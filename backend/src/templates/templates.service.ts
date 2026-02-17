@@ -1,11 +1,13 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { Template, TemplateDocument } from './schemas/template.schema';
+import { Template, TemplateDocument, TemplateArea } from './schemas/template.schema';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { UpdateTemplateDto } from './dto/create-template.dto';
 import { ImageProcessingService } from '../images/services/image-processing.service';
 import { EmailHtmlGeneratorService } from '../email-generator/services/email-html-generator.service';
+import { AiService } from '../ai/ai.service';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -14,8 +16,10 @@ import { v4 as uuidv4 } from 'uuid';
 export class TemplatesService {
   constructor(
     @InjectModel(Template.name) private templateModel: Model<TemplateDocument>,
+    private configService: ConfigService,
     private imageProcessingService: ImageProcessingService,
     private emailHtmlGeneratorService: EmailHtmlGeneratorService,
+    private aiService: AiService,
   ) {}
 
   async create(
@@ -124,10 +128,12 @@ export class TemplatesService {
   async generateHtml(id: string, userId: string): Promise<{ html: string }> {
     const template = await this.findOne(id, userId);
     const areasToRender = await this.resolveSlicesToImageUrls(template);
+    const baseUrl = this.configService.get<string>('APP_URL') || '';
     const html = this.emailHtmlGeneratorService.generateEmailHtml(
       areasToRender,
       template.emailWidth,
       template.backgroundColor,
+      baseUrl,
     );
     template.htmlContent = html;
     await template.save();
@@ -212,5 +218,34 @@ export class TemplatesService {
     await template.save();
 
     return { detectedButtons };
+  }
+
+  /**
+   * Usa IA de visão para analisar a imagem do template e gerar as áreas da tabela (e depois o HTML).
+   * Converte coordenadas da imagem (pixels) para o espaço do canvas (emailWidth).
+   */
+  async analyzeImageWithAi(id: string, userId: string): Promise<{ areas: TemplateArea[] }> {
+    const template = await this.findOne(id, userId);
+    const imageWidth = template.metadata?.imageWidth ?? template.emailWidth ?? 600;
+    const imageHeight = template.metadata?.imageHeight ?? 600;
+    const canvasWidth = template.emailWidth || 600;
+    const scale = canvasWidth / imageWidth;
+
+    const relativePath = template.originalImageUrl.replace(/^\//, '');
+    const filepath = path.join(process.cwd(), relativePath);
+    const buffer = await fs.readFile(filepath);
+
+    const areasInImageCoords = await this.aiService.analyzeEmailImage(buffer, imageWidth, imageHeight);
+    const areas: TemplateArea[] = areasInImageCoords.map((a) => ({
+      ...a,
+      x: Math.round(a.x * scale),
+      y: Math.round(a.y * scale),
+      width: Math.round(a.width * scale),
+      height: Math.round(a.height * scale),
+    }));
+
+    template.areas = areas;
+    await template.save();
+    return { areas };
   }
 }

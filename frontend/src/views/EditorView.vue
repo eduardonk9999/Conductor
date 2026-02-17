@@ -11,7 +11,14 @@
           </button>
           <h1 class="text-xl font-semibold">{{ template?.name || 'Novo Template' }}</h1>
         </div>
-        <div class="flex items-center space-x-2">
+        <div class="flex items-center flex-wrap gap-2">
+          <button
+            @click="analyzeImageWithAi"
+            class="px-4 py-2 text-sm bg-violet-600 text-white rounded hover:bg-violet-700"
+            :disabled="analyzingImage"
+          >
+            {{ analyzingImage ? 'Analisando...' : 'Analisar imagem com IA' }}
+          </button>
           <button @click="processOcr" class="px-4 py-2 text-sm bg-purple-600 text-white rounded hover:bg-purple-700" :disabled="processingOcr">
             {{ processingOcr ? 'Processando...' : 'Detectar Textos (OCR)' }}
           </button>
@@ -127,6 +134,19 @@
             <p v-if="isDrawing" class="text-xs text-blue-600 mt-2 font-medium">Solte o mouse para concluir a fatia.</p>
           </div>
 
+          <div>
+            <label class="block text-sm font-semibold text-gray-700 mb-1">Largura do email (px)</label>
+            <input
+              v-model.number="emailWidth"
+              type="number"
+              min="320"
+              max="1200"
+              step="20"
+              class="w-full px-3 py-2 border rounded text-sm"
+            />
+            <p class="text-xs text-gray-500 mt-1">Entre 320 e 1200. Mobile usa 100%.</p>
+          </div>
+
           <!-- OCR Results -->
           <div v-if="ocrResults.length > 0">
             <h3 class="text-sm font-semibold text-gray-700 mb-2">Textos Detectados (OCR)</h3>
@@ -204,6 +224,26 @@
                   class="w-full px-3 py-2 border rounded text-sm"
                   placeholder="URL da imagem"
                 />
+                <!-- IA open-source: sugerir ou melhorar texto (Ollama/OpenAI) -->
+                <div v-if="aiAvailable && (selectedArea.type === 'text' || selectedArea.type === 'button')" class="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    :disabled="aiLoading"
+                    @click="suggestTextWithAi"
+                    class="px-3 py-1.5 text-xs font-medium rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50"
+                  >
+                    {{ aiLoading ? 'Gerando...' : 'Sugerir com IA' }}
+                  </button>
+                  <button
+                    v-if="selectedArea.type === 'text' && selectedArea.content"
+                    type="button"
+                    :disabled="aiLoading"
+                    @click="improveTextWithAi"
+                    class="px-3 py-1.5 text-xs font-medium rounded border border-violet-600 text-violet-600 hover:bg-violet-50 disabled:opacity-50"
+                  >
+                    Melhorar texto
+                  </button>
+                </div>
               </div>
 
               <div v-if="selectedArea.type === 'button'">
@@ -387,7 +427,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTemplateStore } from '@/stores/template'
 import { v4 as uuidv4 } from 'uuid'
@@ -421,12 +461,23 @@ const generatedHtml = ref('')
 const saving = ref(false)
 const processingOcr = ref(false)
 const ocrResults = ref([])
+const aiAvailable = ref(false)
+const aiLoading = ref(false)
+const analyzingImage = ref(false)
 
 function normalizeArea(area) {
   return {
     ...area,
     styles: area.styles && typeof area.styles === 'object' ? area.styles : {}
   }
+}
+
+function onKeyDown(e) {
+  if (e.key !== 'Delete' && e.key !== 'Backspace') return
+  if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return
+  if (!selectedArea.value) return
+  e.preventDefault()
+  deleteSelectedArea()
 }
 
 onMounted(async () => {
@@ -436,11 +487,23 @@ onMounted(async () => {
       template.value = await templateStore.fetchTemplate(templateId)
       areas.value = (template.value.areas || []).map(normalizeArea)
       emailWidth.value = template.value.emailWidth || 600
+      aiAvailable.value = await templateStore.getAiStatus(templateId)
     } catch (err) {
       alert('Template não encontrado.')
       router.push('/templates')
     }
   }
+  document.addEventListener('keydown', onKeyDown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeyDown)
+})
+
+watch(emailWidth, (val) => {
+  if (typeof val !== 'number' || Number.isNaN(val)) return
+  if (val < 320) emailWidth.value = 320
+  if (val > 1200) emailWidth.value = 1200
 })
 
 function addArea(type) {
@@ -690,6 +753,61 @@ async function processOcr() {
     alert(error.response?.data?.message || 'Erro ao processar OCR')
   } finally {
     processingOcr.value = false
+  }
+}
+
+async function suggestTextWithAi() {
+  if (!template.value?._id || !selectedArea.value) return
+  if (selectedArea.value.type !== 'text' && selectedArea.value.type !== 'button') return
+  aiLoading.value = true
+  try {
+    const kind = selectedArea.value.type
+    const text = await templateStore.aiSuggestText(template.value._id, {
+      kind,
+      currentText: selectedArea.value.content,
+      context: template.value.name
+    })
+    if (text) selectedArea.value.content = text
+  } catch (err) {
+    alert(err.response?.data?.message || 'Erro ao sugerir texto com IA.')
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+async function improveTextWithAi() {
+  if (!template.value?._id || !selectedArea.value?.content) return
+  aiLoading.value = true
+  try {
+    const text = await templateStore.aiImproveText(template.value._id, {
+      text: selectedArea.value.content,
+      instruction: 'Tom profissional e claro para email marketing.'
+    })
+    if (text) selectedArea.value.content = text
+  } catch (err) {
+    alert(err.response?.data?.message || 'Erro ao melhorar texto.')
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+async function analyzeImageWithAi() {
+  if (!template.value?._id) {
+    alert('Carregue um template primeiro.')
+    return
+  }
+  analyzingImage.value = true
+  selectedArea.value = null
+  try {
+    const newAreas = await templateStore.aiAnalyzeImage(template.value._id)
+    areas.value = (newAreas || []).map(normalizeArea)
+    alert(`IA criou ${areas.value.length} regiões. Revise e clique em "Gerar HTML" para ver o resultado.`)
+  } catch (err) {
+    const msg = err.response?.data?.message ?? err.message ?? 'Erro ao analisar imagem.'
+    const text = Array.isArray(msg) ? msg.join('\n') : msg
+    alert(text)
+  } finally {
+    analyzingImage.value = false
   }
 }
 

@@ -2,6 +2,8 @@
 
 Sistema completo para criação de templates de email marketing a partir de imagens, com editor visual interativo, OCR, detecção automática de elementos e geração de HTML responsivo.
 
+📋 **Lista de tarefas (tasks incrementais):** [TAREFAS.md](./TAREFAS.md)
+
 ## 🚀 Funcionalidades
 
 ### ✨ Principais Recursos
@@ -15,6 +17,7 @@ Sistema completo para criação de templates de email marketing a partir de imag
 - **Preview em Tempo Real**: Visualize o email final antes de exportar
 - **HTML Responsivo**: Gera código compatível com todos os principais clientes de email
 - **Autenticação**: Sistema completo de login e registro de usuários
+- **IA open-source (estilo OpenClaw)**: Sugestão e melhoria de textos com modelos locais (Ollama) ou API OpenAI — self-hosted, dados sob seu controle
 
 ### 🎨 Tipos de Elementos
 
@@ -32,6 +35,7 @@ Sistema completo para criação de templates de email marketing a partir de imag
 - Sharp (Processamento de imagens)
 - Juice (Inline CSS)
 - JWT (Autenticação)
+- IA: Ollama (padrão) ou API OpenAI-compatible
 
 **Frontend:**
 - Vue.js 3 (Composition API)
@@ -111,6 +115,29 @@ npm run dev
 
 O frontend estará rodando em `http://localhost:5173`
 
+### Configurar IA open-source (Ollama)
+
+Para usar **Sugerir com IA**, **Melhorar texto** e **Analisar imagem com IA** (estilo self-hosted, como no OpenClaw):
+
+1. Instale o [Ollama](https://ollama.com) e baixe modelos:
+   ```bash
+   ollama pull llama3.2    # texto (sugerir/melhorar)
+   ollama pull llava       # visão (analisar imagem e criar tabela)
+   ```
+2. No `.env` do backend, ative a IA:
+   ```
+   AI_ENABLED=true
+   AI_PROVIDER=ollama
+   OLLAMA_BASE_URL=http://localhost:11434
+   AI_MODEL=llama3.2
+   AI_VISION_MODEL=llava
+   ```
+3. Reinicie o backend.
+   - **Analisar imagem com IA**: no editor, clique no botão violeta. A IA analisa a imagem e cria as regiões (fatias, texto, botões, etc.); depois use **Gerar HTML** para ver o resultado.
+   - **Sugerir / Melhorar texto**: selecione um bloco de texto ou botão e use os botões no painel.
+
+Alternativa com OpenAI (ou API compatível): use `AI_PROVIDER=openai`, `OPENAI_API_KEY` e, para visão, `AI_VISION_MODEL=gpt-4o` (ou outro modelo com visão).
+
 ## 📖 Como Usar
 
 ### 1. Criar Conta
@@ -145,7 +172,17 @@ O frontend estará rodando em `http://localhost:5173`
    - Redimensione arrastando as alças de canto
    - Mova o elemento arrastando
 
-4. **Gerar HTML:**
+4. **Analisar imagem com IA (opcional):**
+   - Configure a IA com um modelo de visão (veja *Configurar IA* abaixo; ex: `ollama pull llava`)
+   - No editor, clique em **"Analisar imagem com IA"**. A IA analisa o layout e cria as regiões (cabeçalho, textos, botões, etc.)
+   - Ajuste as áreas se necessário e clique em **"Gerar HTML"** para gerar a tabela
+
+5. **Sugerir / melhorar texto com IA (opcional):**
+   - No editor, selecione um bloco de **Texto** ou **Botão**
+   - Use **"Sugerir com IA"** para gerar um parágrafo ou CTA
+   - Use **"Melhorar texto"** (só em blocos de texto) para reescrever o conteúdo
+
+6. **Gerar HTML:**
    - Clique em "Gerar HTML"
    - Visualize o preview visual e o código
    - Copie o código ou faça download
@@ -167,6 +204,7 @@ email-marketing-saas/
 │   │   ├── templates/         # CRUD de templates
 │   │   ├── images/            # Processamento de imagens e OCR
 │   │   ├── email-generator/   # Geração de HTML
+│   │   ├── ai/                # IA open-source (Ollama/OpenAI): sugerir e melhorar textos
 │   │   ├── config/            # Configurações
 │   │   ├── main.ts           
 │   │   └── app.module.ts

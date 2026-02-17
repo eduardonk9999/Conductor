@@ -116,6 +116,37 @@ export const useTemplateStore = defineStore('template', () => {
     }
   }
 
+  async function getAiStatus(id) {
+    try {
+      const response = await api.get(`/templates/${id}/ai/status`)
+      return response.data.available === true
+    } catch {
+      return false
+    }
+  }
+
+  async function aiSuggestText(id, { kind, currentText, context }) {
+    const response = await api.post(`/templates/${id}/ai/suggest-text`, {
+      kind,
+      currentText: currentText || undefined,
+      context: context || undefined
+    })
+    return response.data.text
+  }
+
+  async function aiImproveText(id, { text, instruction }) {
+    const response = await api.post(`/templates/${id}/ai/improve-text`, {
+      text,
+      instruction: instruction || undefined
+    })
+    return response.data.text
+  }
+
+  async function aiAnalyzeImage(id) {
+    const response = await api.post(`/templates/${id}/ai/analyze-image`)
+    return response.data.areas
+  }
+
   return {
     templates,
     currentTemplate,
@@ -127,6 +158,10 @@ export const useTemplateStore = defineStore('template', () => {
     deleteTemplate,
     generateHtml,
     processOcr,
-    detectElements
+    detectElements,
+    getAiStatus,
+    aiSuggestText,
+    aiImproveText,
+    aiAnalyzeImage
   }
 })
