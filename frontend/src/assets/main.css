@@ -44,14 +44,25 @@ body {
 .selection-area {
   position: absolute;
   border: 2px dashed #3b82f6;
-  background-color: rgba(59, 130, 246, 0.1);
+  background-color: rgba(59, 130, 246, 0.08);
   cursor: move;
   z-index: 10;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
 }
 
+/* Área selecionada: borda sólida, contorno e destaque visível */
 .selection-area.active {
-  border-color: #ef4444;
-  background-color: rgba(239, 68, 68, 0.1);
+  border: 3px solid #2563eb;
+  border-style: solid;
+  background-color: rgba(37, 99, 235, 0.12);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 5px rgba(37, 99, 235, 0.35);
+  outline: none;
+}
+
+.selection-area.active .resize-handle {
+  background-color: #2563eb;
+  border: 2px solid white;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.4);
 }
 
 .resize-handle {

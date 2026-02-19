@@ -16,7 +16,7 @@ Tarefas em formato de checklist. Marque com `[x]` quando concluir. Podemos ir fa
 
 ## 2. Frontend – Editor
 
-- [ ] **2.1** Indicador visual de “área selecionada” mais claro (borda/contorno)
+- [x] **2.1** Indicador visual de “área selecionada” mais claro (borda/contorno)
 - [x] **2.2** Atalho de teclado: Delete para remover área selecionada
 - [ ] **2.3** Undo/Redo para ações no editor (adicionar, mover, excluir área)
 - [x] **2.4** Ajustar largura do email (`emailWidth`) com input numérico na sidebar
