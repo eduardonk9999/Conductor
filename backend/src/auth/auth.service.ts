@@ -54,22 +54,33 @@ export class AuthService {
   }
 
   async login(email: string, password: string) {
-    const user = await this.usersService.findByEmail(email);
-    
-    if (!user || !(await this.usersService.validatePassword(user, password))) {
-      throw new UnauthorizedException('Invalid credentials');
+    try {
+      const user = await this.usersService.findByEmail(email);
+      if (!user || !(await this.usersService.validatePassword(user, password))) {
+        throw new UnauthorizedException('Email ou senha incorretos.');
+      }
+      const payload = { email: user.email, sub: String(user._id) };
+      const access_token = this.jwtService.sign(payload);
+      return {
+        access_token,
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+        },
+      };
+    } catch (error: any) {
+      if (error instanceof UnauthorizedException) throw error;
+      if (error?.code === 11000) {
+        throw new BadRequestException('Este email já está em uso.');
+      }
+      console.error('Login error:', error);
+      const message =
+        error?.message?.includes('connect') || error?.message?.includes('MongoNetworkError')
+          ? 'Não foi possível conectar ao banco. Verifique se o MongoDB está rodando.'
+          : 'Erro ao fazer login. Tente novamente.';
+      throw new InternalServerErrorException(message);
     }
-
-    const payload = { email: user.email, sub: user._id };
-    
-    return {
-      access_token: this.jwtService.sign(payload),
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-      },
-    };
   }
 
   async validateUser(userId: string) {

@@ -1,5 +1,69 @@
 <template>
-  <div class="min-h-screen bg-gray-100">
+  <!-- Tela de upload quando não há template carregado -->
+  <div v-if="!template" class="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+    <div
+      class="bg-white rounded-2xl shadow-xl max-w-lg w-full p-8"
+      @dragover.prevent="dragOver = true"
+      @dragleave.prevent="dragOver = false"
+      @drop.prevent="handleDrop"
+    >
+      <div class="flex items-center space-x-3 mb-6">
+        <button @click="goBack" class="text-gray-400 hover:text-gray-700">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+          </svg>
+        </button>
+        <h1 class="text-2xl font-bold text-gray-900">Novo Template</h1>
+      </div>
+
+      <form @submit.prevent="handleUploadCreate" class="space-y-5">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Nome do template</label>
+          <input
+            v-model="uploadForm.name"
+            type="text"
+            required
+            placeholder="Ex: Newsletter de Março"
+            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Imagem do email</label>
+          <label
+            :class="[
+              'flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl cursor-pointer transition',
+              dragOver ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50'
+            ]"
+          >
+            <input type="file" accept="image/*" class="hidden" @change="handleUploadFileSelect" ref="uploadFileInput" />
+            <template v-if="uploadForm.previewUrl">
+              <img :src="uploadForm.previewUrl" class="h-full w-full object-contain rounded-xl" />
+            </template>
+            <template v-else>
+              <svg class="w-10 h-10 text-gray-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+              </svg>
+              <p class="text-sm text-gray-500">Arraste a imagem aqui ou <span class="text-blue-600 font-medium">clique para selecionar</span></p>
+              <p class="text-xs text-gray-400 mt-1">PNG, JPG, WebP — até 20MB</p>
+            </template>
+          </label>
+          <p v-if="uploadForm.file" class="text-xs text-gray-500 mt-1">{{ uploadForm.file.name }}</p>
+        </div>
+
+        <button
+          type="submit"
+          :disabled="uploading || !uploadForm.file || !uploadForm.name"
+          class="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+        >
+          {{ uploading ? 'Criando template...' : 'Criar e abrir editor' }}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Editor principal -->
+  <div v-else class="min-h-screen bg-gray-100">
     <!-- Header -->
     <header class="bg-white shadow-sm border-b sticky top-0 z-50">
       <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -464,6 +528,54 @@ const ocrResults = ref([])
 const aiAvailable = ref(false)
 const aiLoading = ref(false)
 const analyzingImage = ref(false)
+
+// Upload direto no editor
+const uploading = ref(false)
+const dragOver = ref(false)
+const uploadFileInput = ref(null)
+const uploadForm = ref({ name: '', file: null, previewUrl: null })
+
+function handleUploadFileSelect(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  uploadForm.value.file = file
+  uploadForm.value.previewUrl = URL.createObjectURL(file)
+  if (!uploadForm.value.name) {
+    uploadForm.value.name = file.name.replace(/\.[^.]+$/, '')
+  }
+}
+
+function handleDrop(e) {
+  dragOver.value = false
+  const file = e.dataTransfer.files[0]
+  if (!file || !file.type.startsWith('image/')) return
+  uploadForm.value.file = file
+  uploadForm.value.previewUrl = URL.createObjectURL(file)
+  if (!uploadForm.value.name) {
+    uploadForm.value.name = file.name.replace(/\.[^.]+$/, '')
+  }
+}
+
+async function handleUploadCreate() {
+  if (!uploadForm.value.file || !uploadForm.value.name) return
+  uploading.value = true
+  try {
+    const formData = new FormData()
+    formData.append('name', uploadForm.value.name)
+    formData.append('image', uploadForm.value.file)
+    const created = await templateStore.createTemplate(formData)
+    // Atualiza a URL sem recarregar a página, depois carrega o template no editor
+    router.replace(`/editor/${created._id}`)
+    template.value = created
+    areas.value = (created.areas || []).map(normalizeArea)
+    emailWidth.value = created.emailWidth || 600
+    aiAvailable.value = await templateStore.getAiStatus(created._id)
+  } catch (err) {
+    alert(err.response?.data?.message || 'Erro ao criar template.')
+  } finally {
+    uploading.value = false
+  }
+}
 
 function normalizeArea(area) {
   return {

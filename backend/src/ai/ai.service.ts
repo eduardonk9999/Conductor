@@ -122,7 +122,13 @@ export class AiService {
 
   /**
    * Analisa a imagem do template e retorna regiões (áreas) para montar a tabela HTML.
-   * Requer modelo de visão (Ollama: llava, gemma3; OpenAI: gpt-4o, gpt-4-vision-preview).
+   *
+   * Estratégia híbrida:
+   * 1. Sharp segmenta a imagem em blocos horizontais via análise de pixels
+   *    (detecta automaticamente onde termina área gráfica e começa fundo liso)
+   * 2. Para cada bloco com fundo liso, a IA classifica se é text/button/color/spacer
+   *    e extrai o texto visível (tarefa simples e confiável)
+   * 3. Blocos com fundo complexo/gráfico viram "slice" automaticamente (sem IA)
    */
   async analyzeEmailImage(
     imageBuffer: Buffer,
@@ -132,25 +138,268 @@ export class AiService {
     if (!this.isAvailable()) {
       throw new Error('IA não está configurada. Para visão use um modelo com suporte a imagem (ex: llava, gemma3).');
     }
-    const base64 = imageBuffer.toString('base64');
-    const system =
-      'Você analisa imagens de templates de email marketing. Sua resposta deve ser APENAS um JSON válido, sem markdown e sem texto antes ou depois.';
-    const user = `Imagem ${imageWidth}x${imageHeight} px. Gere um email HTML responsivo (uma coluna).
 
-REGRAS IMPORTANTES:
-- Crie POUCAS regiões (blocos grandes e semânticos). Não crie regiões para uma palavra ou ícone só.
-- Cada região deve ter NO MÍNIMO 40px de altura e 80px de largura. Ignore detalhes pequenos.
-- Banner/cabeçalho no topo = UMA região "slice" cobrindo toda a área (título + subtítulo + botão do header).
-- Cada parágrafo de texto = UMA região "text" (parágrafo inteiro, não linha por linha).
-- Botão de destaque (CTA) = UMA região "button" com o retângulo do botão.
-- Faixas de cor ou separadores = "color". Espaços vazios grandes = "spacer".
+    // 1. Segmentação automática por pixels
+    const segments = await this.segmentImageByPixels(imageBuffer, imageWidth, imageHeight);
+    console.log('[AI] Segments found by pixel analysis:', segments.map(s => `${s.type}(y=${s.y},h=${s.height})`).join(', '));
 
-Retorne um array JSON. Cada objeto: "type" ("slice"|"text"|"button"|"color"|"spacer"), "x", "y", "width", "height" em pixels, e opcionalmente "content" (texto do bloco, para text/button) e "link" (para button). Ordene por "y" (de cima para baixo). Use números inteiros. Exemplo: [{"type":"slice","x":0,"y":0,"width":600,"height":220},{"type":"text","x":24,"y":240,"width":552,"height":120,"content":"Texto do parágrafo aqui"}]`;
-    const raw =
-      this.provider === 'ollama'
-        ? await this.callOllamaWithImage(user, base64)
-        : await this.callOpenAIWithImage(system, user, base64);
-    return this.parseAreasFromResponse(raw, imageWidth, imageHeight);
+    // 2. Para segmentos com fundo liso, pede à IA para classificar e extrair texto
+    const areas: TemplateArea[] = [];
+    for (const seg of segments) {
+      if (seg.type === 'slice') {
+        // Área gráfica: não precisa de IA, vai virar imagem recortada
+        areas.push({ id: uuidv4(), type: 'slice', x: 0, y: seg.y, width: imageWidth, height: seg.height });
+      } else {
+        // Fundo liso: IA classifica e extrai texto do crop deste bloco
+        const classified = await this.classifyFlatBlock(imageBuffer, imageWidth, seg, imageHeight);
+        areas.push(classified);
+      }
+    }
+
+    return areas;
+  }
+
+  /**
+   * Analisa os pixels da imagem linha por linha com Sharp e agrupa em segmentos:
+   * - "slice": linhas com pixels variados/coloridos (área gráfica)
+   * - "flat": linhas com cor de fundo quase uniforme (branco, cinza claro etc.)
+   *
+   * Retorna blocos consolidados, fundindo linhas adjacentes do mesmo tipo.
+   */
+  private async segmentImageByPixels(
+    buffer: Buffer,
+    imageWidth: number,
+    imageHeight: number,
+  ): Promise<Array<{ type: 'slice' | 'flat'; y: number; height: number; bgColor?: string }>> {
+    const SAMPLE_W = 80;
+    const sampleH = Math.round(imageHeight * SAMPLE_W / imageWidth);
+
+    const { data } = await (await import('sharp')).default(buffer)
+      .resize(SAMPLE_W, sampleH, { fit: 'fill' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = 3;
+    const lineTypes: Array<{ type: 'slice' | 'flat'; bgColor: string }> = [];
+
+    for (let row = 0; row < sampleH; row++) {
+      const offset = row * SAMPLE_W * channels;
+      // Histograma de cor por canal (8 buckets de 32 valores cada)
+      const rB = new Array(8).fill(0);
+      const gB = new Array(8).fill(0);
+      const bB = new Array(8).fill(0);
+      let sumR = 0, sumG = 0, sumB = 0;
+
+      for (let col = 0; col < SAMPLE_W; col++) {
+        const i = offset + col * channels;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        rB[Math.floor(r / 32)]++;
+        gB[Math.floor(g / 32)]++;
+        bB[Math.floor(b / 32)]++;
+        sumR += r; sumG += g; sumB += b;
+      }
+
+      // Dominância: % de pixels no bucket mais frequente de cada canal
+      const domR = Math.max(...rB) / SAMPLE_W;
+      const domG = Math.max(...gB) / SAMPLE_W;
+      const domB = Math.max(...bB) / SAMPLE_W;
+      const avgDominance = (domR + domG + domB) / 3;
+
+      const avgR = Math.round(sumR / SAMPLE_W);
+      const avgG = Math.round(sumG / SAMPLE_W);
+      const avgB = Math.round(sumB / SAMPLE_W);
+      const lightness = (avgR + avgG + avgB) / 3;
+
+      // Fundo liso: cor dominante concentrada (histograma com pico alto) E fundo claro
+      // Isso distingue texto preto sobre branco (flat) de gradientes/fotos coloridas (slice)
+      const isFlat = avgDominance > 0.55 && lightness > 180;
+
+      const bgHex = `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
+      lineTypes.push({ type: isFlat ? 'flat' : 'slice', bgColor: bgHex });
+    }
+
+    // Consolida linhas adjacentes do mesmo tipo em blocos
+    // Converte coordenadas de volta para a escala original
+    const scale = imageHeight / sampleH;
+    const raw: Array<{ type: 'slice' | 'flat'; y: number; height: number; bgColor: string }> = [];
+    let i = 0;
+    while (i < lineTypes.length) {
+      const startI = i;
+      const { type, bgColor } = lineTypes[i];
+      while (i < lineTypes.length && lineTypes[i].type === type) i++;
+      const y = Math.round(startI * scale);
+      const endY = Math.min(imageHeight, Math.round(i * scale));
+      raw.push({ type, y, height: endY - y, bgColor });
+    }
+
+    // Mescla blocos muito pequenos com o vizinho (evita fragmentação)
+    const MIN_BLOCK = 30;
+    const merged = this.mergeSmallBlocks(raw, MIN_BLOCK, imageHeight);
+    return merged;
+  }
+
+  /**
+   * Funde blocos menores que minHeight com o vizinho mais próximo.
+   */
+  private mergeSmallBlocks(
+    blocks: Array<{ type: 'slice' | 'flat'; y: number; height: number; bgColor: string }>,
+    minHeight: number,
+    imageHeight: number,
+  ) {
+    let changed = true;
+    let arr = [...blocks];
+    while (changed) {
+      changed = false;
+      const next: typeof arr = [];
+      let j = 0;
+      while (j < arr.length) {
+        const cur = arr[j];
+        if (cur.height < minHeight && arr.length > 1) {
+          // Funde com o vizinho que tiver o mesmo tipo, senão com o próximo
+          const prev = next[next.length - 1];
+          const nxt = arr[j + 1];
+          if (prev && (!nxt || prev.type === cur.type)) {
+            prev.height += cur.height;
+            changed = true;
+          } else if (nxt) {
+            arr[j + 1] = { ...nxt, y: cur.y, height: cur.height + nxt.height };
+            changed = true;
+          } else {
+            next.push(cur);
+          }
+        } else {
+          next.push(cur);
+        }
+        j++;
+      }
+      arr = next;
+    }
+    // Recalcula y sequencialmente para garantir continuidade
+    let cursor = 0;
+    for (const b of arr) { b.y = cursor; cursor += b.height; }
+    if (arr.length > 0) arr[arr.length - 1].height += imageHeight - cursor;
+    return arr;
+  }
+
+  /**
+   * Dado um bloco de fundo liso (flat), pede à IA para:
+   * - Classificar: "text", "button", "color" ou "spacer"
+   * - Extrair o texto visível (se houver)
+   * - Identificar a cor de fundo e do botão
+   *
+   * Envia apenas o crop deste bloco para a IA — imagem menor, resposta mais precisa.
+   */
+  private async classifyFlatBlock(
+    fullBuffer: Buffer,
+    imageWidth: number,
+    seg: { y: number; height: number; bgColor?: string },
+    imageHeight: number,
+  ): Promise<TemplateArea> {
+    // Recorta só o bloco em questão
+    const top = Math.max(0, seg.y);
+    const height = Math.min(seg.height, imageHeight - top);
+    let cropBase64: string;
+    try {
+      const sharp = (await import('sharp')).default;
+      const cropBuf = await sharp(fullBuffer)
+        .extract({ left: 0, top, width: imageWidth, height: Math.max(1, height) })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      cropBase64 = cropBuf.toString('base64');
+    } catch {
+      // Se o crop falhar, retorna spacer
+      return { id: uuidv4(), type: 'spacer', x: 0, y: seg.y, width: imageWidth, height: seg.height };
+    }
+
+    const system = `You are an email block classifier. Output ONLY a single-line JSON object. No explanation.`;
+    const user = `This is a cropped section of an email on a plain/white background.
+Classify it and respond with a single JSON object:
+{"type":"text"|"button"|"color"|"spacer", "content":"exact visible text or empty string", "bgColor":"#rrggbb"}
+
+Rules:
+- "text": contains readable paragraph text → include ALL visible text in "content"
+- "button": contains a CTA/button label → put label in "content", button bg color in "bgColor"
+- "color": solid color stripe with no meaningful text → put its color in "bgColor"
+- "spacer": blank whitespace → content and bgColor can be empty
+
+Respond with ONLY the JSON object, one line.`;
+
+    let raw = '';
+    try {
+      raw = this.provider === 'ollama'
+        ? await this.callOllamaWithImage(user, cropBase64)
+        : await this.callOpenAIWithImage(system, user, cropBase64);
+      console.log(`[AI] Block y=${seg.y} classified:`, raw.substring(0, 200));
+    } catch {
+      // Se IA falhar no bloco individual, assume spacer
+      return { id: uuidv4(), type: 'spacer', x: 0, y: seg.y, width: imageWidth, height: seg.height };
+    }
+
+    return this.parseBlockClassification(raw, seg, imageWidth);
+  }
+
+  /**
+   * Faz o parse da resposta de classificação de um bloco individual.
+   */
+  private parseBlockClassification(
+    raw: string,
+    seg: { y: number; height: number; bgColor?: string },
+    imageWidth: number,
+  ): TemplateArea {
+    let jsonStr = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    const match = jsonStr.match(/\{[\s\S]*?\}/);
+    if (match) jsonStr = match[0];
+
+    let obj: Record<string, unknown> = {};
+    try { obj = JSON.parse(jsonStr) as Record<string, unknown>; } catch { /* usa defaults */ }
+
+    const allowed = ['text', 'button', 'color', 'spacer'] as const;
+    type FlatType = typeof allowed[number];
+    const rawType = obj.type as string;
+    const blockType: FlatType = allowed.includes(rawType as FlatType) ? (rawType as FlatType) : 'spacer';
+
+    const content = typeof obj.content === 'string' ? obj.content.trim() : '';
+    const bgColor = (typeof obj.bgColor === 'string' ? obj.bgColor : seg.bgColor) || '#ffffff';
+
+    const styles: TemplateArea['styles'] = {};
+    if (blockType === 'text') {
+      styles.fontSize = 16;
+      styles.color = '#333333';
+      styles.textAlign = 'left';
+      styles.padding = '12px 24px';
+    }
+    if (blockType === 'button') {
+      styles.backgroundColor = bgColor;
+      styles.color = this.contrastColor(bgColor);
+      styles.fontSize = 16;
+      styles.borderRadius = '4px';
+      styles.padding = '14px 32px';
+    }
+    if (blockType === 'color') {
+      styles.backgroundColor = bgColor;
+    }
+
+    return {
+      id: uuidv4(),
+      type: blockType,
+      x: 0,
+      y: seg.y,
+      width: imageWidth,
+      height: seg.height,
+      content: content || (blockType === 'button' ? 'Clique aqui' : blockType === 'text' ? '' : undefined),
+      link: blockType === 'button' ? '#' : undefined,
+      styles: Object.keys(styles).length ? styles : undefined,
+    };
+  }
+
+  /** Retorna preto ou branco dependendo do contraste com a cor de fundo (WCAG). */
+  private contrastColor(hex: string): string {
+    const clean = hex.replace('#', '');
+    const r = parseInt(clean.substring(0, 2), 16) || 0;
+    const g = parseInt(clean.substring(2, 4), 16) || 0;
+    const b = parseInt(clean.substring(4, 6), 16) || 0;
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.5 ? '#000000' : '#ffffff';
   }
 
   private async callOllamaWithImage(userPrompt: string, imageBase64: string): Promise<string> {
@@ -213,96 +462,4 @@ Retorne um array JSON. Cada objeto: "type" ("slice"|"text"|"button"|"color"|"spa
     return (data.choices?.[0]?.message?.content ?? '').trim();
   }
 
-  private static readonly MIN_AREA_WIDTH = 50;
-  private static readonly MIN_AREA_HEIGHT = 36;
-
-  private parseAreasFromResponse(
-    raw: string,
-    imageWidth: number,
-    imageHeight: number,
-  ): TemplateArea[] {
-    let jsonStr = raw.trim();
-    const match = jsonStr.match(/\[[\s\S]*\]/);
-    if (match) jsonStr = match[0];
-    jsonStr = jsonStr.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-    const parsed = JSON.parse(jsonStr) as Array<Record<string, unknown>>;
-    const allowed: TemplateArea['type'][] = ['slice', 'text', 'button', 'color', 'image', 'spacer'];
-    const areas: TemplateArea[] = [];
-    for (const item of parsed) {
-      const type = (item.type as string) || 'slice';
-      const areaType = allowed.includes(type as TemplateArea['type']) ? (type as TemplateArea['type']) : 'slice';
-      let x = Number(item.x);
-      let y = Number(item.y);
-      let width = Number(item.width);
-      let height = Number(item.height);
-      if (!Number.isFinite(x)) x = 0;
-      if (!Number.isFinite(y)) y = 0;
-      if (!Number.isFinite(width) || width <= 0) width = Math.min(100, imageWidth);
-      if (!Number.isFinite(height) || height <= 0) height = Math.min(40, imageHeight);
-      x = Math.max(0, Math.min(x, imageWidth));
-      y = Math.max(0, Math.min(y, imageHeight));
-      width = Math.max(1, Math.min(width, imageWidth - x));
-      height = Math.max(1, Math.min(height, imageHeight - y));
-      if (width < AiService.MIN_AREA_WIDTH || height < AiService.MIN_AREA_HEIGHT) continue;
-      width = Math.max(width, AiService.MIN_AREA_WIDTH);
-      height = Math.max(height, AiService.MIN_AREA_HEIGHT);
-      const content = typeof item.content === 'string' ? item.content.trim() : undefined;
-      const link = typeof item.link === 'string' ? item.link : undefined;
-      const styles: TemplateArea['styles'] = {};
-      if (areaType === 'text') {
-        styles.fontSize = 16;
-        styles.color = '#333333';
-        styles.textAlign = 'left';
-      }
-      if (areaType === 'button') {
-        styles.fontSize = 16;
-        styles.color = '#ffffff';
-        styles.backgroundColor = '#007bff';
-      }
-      if (areaType === 'color') {
-        styles.backgroundColor = '#f0f0f0';
-      }
-      areas.push({
-        id: uuidv4(),
-        type: areaType,
-        x,
-        y,
-        width,
-        height,
-        content: content || (areaType === 'button' ? 'Clique aqui' : areaType === 'text' ? '' : undefined),
-        link: areaType === 'button' ? link : undefined,
-        styles: Object.keys(styles).length ? styles : undefined,
-      });
-    }
-    const sorted = areas.sort((a, b) => a.y - b.y);
-    return this.mergeAdjacentTextAreas(sorted);
-  }
-
-  private mergeAdjacentTextAreas(areas: TemplateArea[]): TemplateArea[] {
-    const result: TemplateArea[] = [];
-    for (const area of areas) {
-      if (area.type !== 'text') {
-        result.push(area);
-        continue;
-      }
-      const prev = result[result.length - 1];
-      const gap = prev && prev.type === 'text' ? area.y - (prev.y + prev.height) : 999;
-      if (prev && prev.type === 'text' && gap >= 0 && gap <= 25) {
-        const minX = Math.min(prev.x, area.x);
-        const maxRight = Math.max(prev.x + prev.width, area.x + area.width);
-        const newHeight = area.y + area.height - prev.y;
-        const newContent = [prev.content, area.content].filter(Boolean).join(' ');
-        result[result.length - 1] = {
-          ...prev,
-          x: minX,
-          width: maxRight - minX,
-          height: newHeight,
-          content: newContent || prev.content,
-        };
-      } else {
-        result.push(area);
-      }
-    }
-    return result;
-  }
 }
